@@ -1,31 +1,62 @@
-import os
-import time
-import pygame
 import streamlit as st
 import speech_recognition as sr
 from gtts import gTTS
 from googletrans import LANGUAGES, Translator
+import tempfile
+import os
+from io import BytesIO
+
+# Initialize session state variables
+if 'transcript' not in st.session_state:
+    st.session_state.transcript = []
+if 'is_listening' not in st.session_state:
+    st.session_state.is_listening = False
 
 # Background styling
 st.markdown(
     """
     <style>
         .stApp {
-            background: url("https://plus.unsplash.com/premium_photo-1661963515041-661b417c0b45?q=80&w=2340&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D") no-repeat center center fixed;
-            background-size: cover;
+            background: linear-gradient(to bottom, #f5f7fa, #c3cfe2);
+        }
+        .transcript-box {
+            background-color: rgba(255,255,255,0.85);
+            color: black;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+        .footer {
+            position: fixed;
+            bottom: 15px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 15px;
+            font-family: "Gill Sans", sans-serif;
+            color: #888888;
+            opacity: 0.7;
+            text-align: center;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# Initialize translator and pygame
+# Initialize translator
 translator = Translator()
-pygame.mixer.init()
-
-# Session state to store transcript
-if 'transcript' not in st.session_state:
-    st.session_state.transcript = []
 
 # Create language mapping
 language_mapping = {name: code for code, name in LANGUAGES.items()}
@@ -33,106 +64,139 @@ language_mapping = {name: code for code, name in LANGUAGES.items()}
 def get_language_code(language_name):
     return language_mapping.get(language_name, language_name)
 
-def translator_function(spoken_text, from_language, to_language):
-    return translator.translate(spoken_text, src=from_language, dest=to_language)
+def translate_text(spoken_text, from_language, to_language):
+    try:
+        translation = translator.translate(spoken_text, src=from_language, dest=to_language)
+        return translation.text
+    except Exception as e:
+        st.error(f"Translation error: {e}")
+        return None
 
-def text_to_voice(text_data, to_language):
-    myobj = gTTS(text=text_data, lang=to_language, slow=False)
-    myobj.save("cache_file.mp3")
-    audio = pygame.mixer.Sound("cache_file.mp3")
-    audio.play()
-    os.remove("cache_file.mp3")
+def text_to_speech(text, language_code):
+    try:
+        tts = gTTS(text=text, lang=language_code, slow=False)
+        
+        # Save to a BytesIO object instead of a file
+        fp = BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        
+        # Return the audio data
+        return fp
+    except Exception as e:
+        st.error(f"Text-to-speech error: {e}")
+        return None
 
-# Control flag
-isTranslateOn = False
-
-# Main processing loop
-def main_process(output_placeholder, from_language, to_language):
-    global isTranslateOn
-
-    while isTranslateOn:
-        rec = sr.Recognizer()
+def recognize_speech(from_language):
+    status_placeholder = st.empty()
+    status_placeholder.markdown(
+        """
+        <div style="text-align: center;">
+            <p>Listening...</p>
+            <div class="loader"></div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    try:
+        # Initialize recognizer
+        r = sr.Recognizer()
+        
+        # Use microphone as source
         with sr.Microphone() as source:
-            output_placeholder.text("Listening...")
-            rec.pause_threshold = 1
-            audio = rec.listen(source, phrase_time_limit=10)
-
-        try:
-            output_placeholder.markdown(
-                """
-                <div style="text-align: center;">
-                    <p>Processing...</p>
-                    <div class="loader"></div>
-                </div>
-                <style>
-                    .loader {
-                        border: 4px solid #f3f3f3;
-                        border-top: 4px solid #3498db;
-                        border-radius: 50%;
-                        width: 20px;
-                        height: 20px;
-                        animation: spin 1s linear infinite;
-                    }
-                    @keyframes spin {
-                        0% { transform: rotate(0deg); }
-                        100% { transform: rotate(360deg); }
-                    }
-                </style>
-                """,
-                unsafe_allow_html=True
-            )
-
-            spoken_text = rec.recognize_google(audio, language=from_language)
-            output_placeholder.text("Translating...")
-            translated_text = translator_function(spoken_text, from_language, to_language)
-
-            # Save to transcript session
-            st.session_state.transcript.append({
-                "spoken": spoken_text,
-                "translated": translated_text.text
-            })
-
-            # Speak it
-            text_to_voice(translated_text.text, to_language)
-
-        except Exception as e:
-            print("Error:", e)
+            r.adjust_for_ambient_noise(source, duration=0.5)
+            audio = r.listen(source, timeout=5, phrase_time_limit=10)
+        
+        status_placeholder.markdown(
+            """
+            <div style="text-align: center;">
+                <p>Processing speech...</p>
+                <div class="loader"></div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        # Recognize speech using Google Speech Recognition
+        text = r.recognize_google(audio, language=from_language)
+        status_placeholder.empty()
+        return text
+    
+    except sr.WaitTimeoutError:
+        status_placeholder.error("No speech detected. Please try again.")
+    except sr.UnknownValueError:
+        status_placeholder.error("Could not understand audio. Please try again.")
+    except sr.RequestError as e:
+        status_placeholder.error(f"Speech recognition service error: {e}")
+    except Exception as e:
+        status_placeholder.error(f"Error: {e}")
+    
+    return None
 
 # --- UI Layout ---
-st.title("Language Translator")
+st.title("Real-Time Language Translator")
 
-# Dropdowns
-from_language_name = st.selectbox("Select Source Language:", list(LANGUAGES.values()))
-to_language_name = st.selectbox("Select Target Language:", list(LANGUAGES.values()))
+# Dropdowns for language selection
+col1, col2 = st.columns(2)
+with col1:
+    from_language_name = st.selectbox("I will speak in:", list(LANGUAGES.values()), index=list(LANGUAGES.values()).index("english"))
+with col2:
+    to_language_name = st.selectbox("Translate to:", list(LANGUAGES.values()), index=list(LANGUAGES.values()).index("spanish"))
 
 # Convert names to codes
 from_language = get_language_code(from_language_name)
 to_language = get_language_code(to_language_name)
 
-# Start and Stop buttons
-start_button = st.button("Speak Now")
-stop_button = st.button("Stop")
+# Action buttons
+col1, col2 = st.columns(2)
+with col1:
+    start_button = st.button("Start Speaking", use_container_width=True)
+with col2:
+    clear_button = st.button("Clear Transcript", use_container_width=True)
 
-# Processing logic
+# Output area
+output_placeholder = st.empty()
+
+# Process speech when button is clicked
 if start_button:
-    if not isTranslateOn:
-        isTranslateOn = True
-        output_placeholder = st.empty()
-        main_process(output_placeholder, from_language, to_language)
+    spoken_text = recognize_speech(from_language)
+    
+    if spoken_text:
+        output_placeholder.info(f"You said: {spoken_text}")
+        
+        # Translate the text
+        translated_text = translate_text(spoken_text, from_language, to_language)
+        
+        if translated_text:
+            # Add to transcript
+            st.session_state.transcript.append({
+                "spoken": spoken_text,
+                "translated": translated_text
+            })
+            
+            # Generate speech from translated text
+            audio_data = text_to_speech(translated_text, to_language)
+            
+            if audio_data:
+                # Display the translation and play the audio
+                st.success(f"Translation: {translated_text}")
+                st.audio(audio_data, format="audio/mp3")
 
-if stop_button:
-    isTranslateOn = False
-    # Optionally clear transcript here if you want:
-    # st.session_state.transcript.clear()
+# Clear transcript if requested
+if clear_button:
+    st.session_state.transcript = []
+    st.experimental_rerun()
 
 # --- Transcript Section ---
 if st.session_state.transcript:
     st.markdown("---")
-    st.subheader("Transcript")
-    for entry in st.session_state.transcript:
+    st.subheader("Translation History")
+    
+    for i, entry in enumerate(reversed(st.session_state.transcript)):
         st.markdown(
             f"""
-            <div style="background-color: rgba(255,255,255,0.85); color: black; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
+            <div class="transcript-box">
                 <p><strong>You said:</strong> {entry['spoken']}</p>
                 <p><strong>Translated:</strong> {entry['translated']}</p>
             </div>
@@ -143,21 +207,8 @@ if st.session_state.transcript:
 # Footer
 st.markdown(
     """
-     <style>
-        .footer {
-            position: fixed;
-            bottom: 15px;
-            left: 50%;
-            transform: translateX(-50%);
-            font-size: 15px;
-            font-family: "Gill Sans", sans-serif;
-            color: #BBBBBB;
-            opacity: 0.7;
-            text-align: center;
-        }
-    </style>
     <div class="footer">
-        Project by Shravan and Sanjay  
+        Project by Shravan and Sanjay
     </div>
     """,
     unsafe_allow_html=True
